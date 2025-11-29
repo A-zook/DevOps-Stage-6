@@ -1,0 +1,141 @@
+services:
+  frontend:
+    build: ./frontend
+    depends_on:
+      - auth-api
+      - todos-api
+      - users-api
+    networks:
+      - appnet
+    labels:
+      - "traefik.enable=true"
+      # HTTPS route for domain
+      - "traefik.http.routers.frontend.rule=Host(`joshuaazi.mooo.com`)"
+      - "traefik.http.routers.frontend.entrypoints=web,websecure"
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      # HTTP fallback for IP/localhost access
+      - "traefik.http.routers.frontend-http.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend-http.entrypoints=web"
+      - "traefik.http.routers.frontend-http.priority=1"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+  auth-api:
+    build: ./auth-api
+    networks:
+      - appnet
+    environment:
+      - AUTH_API_PORT=8080
+      - USERS_API_ADDRESS=http://users-api:8080
+      - JWT_SECRET=myfancysecret
+    labels:
+      - "traefik.enable=true"
+      # HTTPS route for domain
+      - "traefik.http.routers.auth-api.rule=Host(`joshuaazi.mooo.com`) && PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth-api.entrypoints=web,websecure"
+      - "traefik.http.routers.auth-api.priority=10"
+      - "traefik.http.routers.auth-api.middlewares=auth-strip"
+      - "traefik.http.routers.auth-api.tls.certresolver=letsencrypt"
+      # HTTP fallback for IP/localhost access
+      - "traefik.http.routers.auth-api-http.rule=PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth-api-http.entrypoints=web"
+      - "traefik.http.routers.auth-api-http.priority=10"
+      - "traefik.http.routers.auth-api-http.middlewares=auth-strip"
+      - "traefik.http.middlewares.auth-strip.stripprefixregex.regex=^/api/auth"
+      - "traefik.http.services.auth-api.loadbalancer.server.port=8080"
+
+  todos-api:
+    build: ./todos-api
+    networks:
+      - appnet
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_CHANNEL=log_channel
+      - TODO_API_PORT=8082
+      - JWT_SECRET=myfancysecret
+    labels:
+      - "traefik.enable=true"
+      # HTTPS route for domain
+      - "traefik.http.routers.todos-api.rule=Host(`joshuaazi.mooo.com`) && PathPrefix(`/api/todos`)"
+      - "traefik.http.routers.todos-api.entrypoints=web,websecure"
+      - "traefik.http.routers.todos-api.priority=10"
+      - "traefik.http.routers.todos-api.middlewares=todos-strip"
+      - "traefik.http.routers.todos-api.tls.certresolver=letsencrypt"
+      # HTTP fallback for IP/localhost access
+      - "traefik.http.routers.todos-api-http.rule=PathPrefix(`/api/todos`)"
+      - "traefik.http.routers.todos-api-http.entrypoints=web"
+      - "traefik.http.routers.todos-api-http.priority=10"
+      - "traefik.http.routers.todos-api-http.middlewares=todos-strip"
+      - "traefik.http.middlewares.todos-strip.stripprefixregex.regex=^/api"
+      - "traefik.http.services.todos-api.loadbalancer.server.port=8082"
+
+  users-api:
+    build: ./users-api
+    networks:
+      - appnet
+    environment:
+      - JWT_SECRET=myfancysecret
+      - SERVER_PORT=8080
+    labels:
+      - "traefik.enable=true"
+      # HTTPS route for domain
+      - "traefik.http.routers.users-api.rule=Host(`joshuaazi.mooo.com`) && PathPrefix(`/api/users`)"
+      - "traefik.http.routers.users-api.entrypoints=web,websecure"
+      - "traefik.http.routers.users-api.priority=10"
+      - "traefik.http.routers.users-api.middlewares=users-strip"
+      - "traefik.http.routers.users-api.tls.certresolver=letsencrypt"
+      # HTTP fallback for IP/localhost access
+      - "traefik.http.routers.users-api-http.rule=PathPrefix(`/api/users`)"
+      - "traefik.http.routers.users-api-http.entrypoints=web"
+      - "traefik.http.routers.users-api-http.priority=10"
+      - "traefik.http.routers.users-api-http.middlewares=users-strip"
+      - "traefik.http.middlewares.users-strip.stripprefixregex.regex=^/api"
+      - "traefik.http.services.users-api.loadbalancer.server.port=8080"
+
+  log-message-processor:
+    build: ./log-message-processor
+    depends_on:
+      redis:
+        condition: service_healthy  # Wait for Redis to be healthy
+    networks:
+      - appnet
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_CHANNEL=log_channel
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - appnet
+    healthcheck:  # Add health check
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  traefik:
+    image: traefik:3.6.2
+    command:
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=joshuaazi86@gmail.com
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - ./traefik/letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - appnet
+
+networks:
+  appnet:
+    driver: bridge

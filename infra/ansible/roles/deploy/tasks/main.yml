@@ -1,0 +1,158 @@
+---
+# Deploy Role - Clone repo, deploy application
+
+- name: Ensure parent directory exists
+  file:
+    path: "/home/deploy"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+  become: yes
+
+- name: Configure Git to trust repository directory
+  command: git config --global --add safe.directory {{ app_directory }}
+  become: yes
+  ignore_errors: yes
+
+- name: Check if repository exists
+  stat:
+    path: "{{ app_directory }}/.git"
+  register: repo_exists
+
+- name: Clone application repository (first time)
+  git:
+    repo: "{{ app_repo }}"
+    dest: "{{ app_directory }}"
+    version: main
+  become: yes
+  when: not repo_exists.stat.exists
+
+- name: Stash local changes before pulling
+  command: git -C {{ app_directory }} stash
+  become: yes
+  when: repo_exists.stat.exists
+  ignore_errors: yes
+
+- name: Pull latest changes from repository
+  git:
+    repo: "{{ app_repo }}"
+    dest: "{{ app_directory }}"
+    version: main
+    force: no
+    update: yes
+  become: yes
+  register: git_result
+  when: repo_exists.stat.exists
+
+- name: Pop stashed changes
+  command: git -C {{ app_directory }} stash pop
+  become: yes
+  when: repo_exists.stat.exists
+  ignore_errors: yes
+
+- name: Set ownership of repository
+  file:
+    path: "{{ app_directory }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    recurse: yes
+  become: yes
+
+- name: Create Traefik certificates directory in app
+  file:
+    path: "{{ app_directory }}/traefik/letsencrypt"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+  become: yes
+
+- name: Ensure acme.json exists in app directory
+  file:
+    path: "{{ app_directory }}/traefik/letsencrypt/acme.json"
+    state: touch
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0600'
+  become: yes
+
+- name: Check if users-api JAR needs building
+  stat:
+    path: "{{ app_directory }}/users-api/target/*.jar"
+  register: users_api_jar
+
+- name: Build users-api JAR with Maven
+  shell: |
+    cd {{ app_directory }}/users-api
+    ./mvnw clean package -DskipTests
+  become: yes
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-8-openjdk-amd64
+    PATH: "/usr/lib/jvm/java-8-openjdk-amd64/bin:{{ ansible_env.PATH }}"
+  when: not users_api_jar.stat.exists or (git_result is defined and git_result.changed)
+
+- name: Set ownership of built JAR
+  file:
+    path: "{{ app_directory }}/users-api/target"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    recurse: yes
+  become: yes
+  when: not users_api_jar.stat.exists or (git_result is defined and git_result.changed)
+
+- name: Stop existing containers (if any)
+  shell: docker compose down
+  args:
+    chdir: "{{ app_directory }}"
+  become: yes
+  ignore_errors: yes
+
+- name: Create .env file
+  copy:
+    content: |
+      DOMAIN_NAME={{ domain_name }}
+    dest: "{{ app_directory }}/.env"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  become: yes
+
+- name: Build and start Docker containers
+  shell: docker compose up -d --build
+  args:
+    chdir: "{{ app_directory }}"
+  become: yes
+  register: docker_compose_up
+
+- name: Wait for services to be healthy
+  pause:
+    seconds: 30
+
+- name: Check running containers
+  shell: docker compose ps
+  args:
+    chdir: "{{ app_directory }}"
+  become: yes
+  register: container_status
+  changed_when: false
+
+- name: Display container status
+  debug:
+    msg: "{{ container_status.stdout_lines }}"
+
+- name: Verify application is accessible
+  uri:
+    url: "https://{{ domain_name }}"
+    validate_certs: no
+    status_code: 200
+  register: app_health
+  retries: 5
+  delay: 10
+  until: app_health.status == 200
+  ignore_errors: yes
+
+- name: Display deployment result
+  debug:
+    msg: "Application deployed successfully at https://{{ domain_name }}"
+  when: app_health.status == 200
